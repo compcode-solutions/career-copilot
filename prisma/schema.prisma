@@ -19,6 +19,77 @@ datasource db {
   provider = "postgresql"
 }
 
+// ─── Accounts (Phase 3, ADR 0001 + 0002) ─────────────────────────────────────
+// The four tables Better Auth's core schema defines (better-auth 1.7.14,
+// @better-auth/core dist/db/get-tables.mjs), used through its Prisma adapter.
+// One account is one tenant: every owned row carries its userId.
+
+model User {
+  id               String            @id
+  name             String
+  email            String            @unique
+  emailVerified    Boolean           @default(false)
+  image            String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  sessions         Session[]
+  accounts         Account[]
+  applications     Application[]
+  statusEvents     StatusEvent[]
+  documents        Document[]
+  documentVersions DocumentVersion[]
+  chatMessages     ChatMessage[]
+  notes            Note[]
+  jobs             Job[]
+}
+
+/// A signed-in browser. Stored, so one session or all of them can be revoked.
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// A way to sign in: Google, or the email address for magic links.
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+}
+
+/// Short-lived values such as magic-link tokens.
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+}
+
 // ─── Profile (E2-1) ──────────────────────────────────────────────────────────
 
 /// The profile's basics (name, headline, contact details, summary…), one row
@@ -454,9 +525,13 @@ model Application {
   jobs                Job[]
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
+  /// Its owner (ADR 0002). Nullable until the install is claimed and Migration B runs.
+  userId              String?
+  user                User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([status])
   @@index([updatedAt])
+  @@index([userId])
 }
 
 /// One status change. Keeps the application's furthestStage and sentAt from
@@ -470,8 +545,12 @@ model StatusEvent {
   at                    DateTime          @default(now())
   previousFurthestStage FunnelStage?
   previousSentAt        DateTime?
+  /// Its owner (ADR 0002). Nullable until the install is claimed and Migration B runs.
+  userId                String?
+  user                  User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([applicationId, at])
+  @@index([userId])
 }
 
 enum DocumentKind {
@@ -498,8 +577,12 @@ model Document {
   /// Earlier states, after each AI change and before each restore (E8-10).
   versions      DocumentVersion[]
   updatedAt     DateTime          @updatedAt
+  /// Its owner (ADR 0002). Nullable until the install is claimed and Migration B runs.
+  userId        String?
+  user          User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([applicationId, kind])
+  @@index([userId])
 }
 
 /// Why a tailored document has a version (E8-10, APP-13).
@@ -530,8 +613,12 @@ model DocumentVersion {
   /// What changed, e.g. the part's name or the chat request.
   detail     String       @default("")
   createdAt  DateTime     @default(now())
+  /// Its owner (ADR 0002). Nullable until the install is claimed and Migration B runs.
+  userId     String?
+  user       User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([documentId, createdAt])
+  @@index([userId])
 }
 
 enum ChatRole {
@@ -556,8 +643,12 @@ model ChatMessage {
   /// For AI messages, the prompt version that wrote it (E6-5).
   writtenWith   String?
   createdAt     DateTime    @default(now())
+  /// Its owner (ADR 0002). Nullable until the install is claimed and Migration B runs.
+  userId        String?
+  user          User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([applicationId, createdAt])
+  @@index([userId])
 }
 
 /// A private note or activity entry on an application (APP-14, E8-9).
@@ -569,8 +660,12 @@ model Note {
   createdAt     DateTime    @default(now())
   /// Shown as "edited" once it differs from createdAt (E8-9).
   updatedAt     DateTime    @default(now()) @updatedAt
+  /// Its owner (ADR 0002). Nullable until the install is claimed and Migration B runs.
+  userId        String?
+  user          User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([applicationId, createdAt])
+  @@index([userId])
 }
 
 // ─── Job search (E14) ────────────────────────────────────────────────────────
@@ -925,8 +1020,12 @@ model Job {
   startedAt     DateTime?
   finishedAt    DateTime?
   updatedAt     DateTime     @updatedAt
+  /// Its owner (ADR 0002). Nullable until the install is claimed and Migration B runs.
+  userId        String?
+  user          User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([key, createdAt])
   @@index([status])
   @@index([applicationId])
+  @@index([userId])
 }
