@@ -1,0 +1,96 @@
+name: Deploy (VPS)
+
+# CompCode's deploy for career.compcodesolutions.com, same pattern as
+# Relay_CCS/.github/workflows/deploy.yml: an SSH key whose forced command on the
+# VPS is /opt/apps/deploy-dispatch.sh, called with the app name.
+# Upstream's own workflows (ci.yml, release.yml, pages.yml) are disabled on
+# this fork in the Actions settings (deploy/README.md step 3).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-vps-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  APP_NAME: career
+  HEALTH_URL: https://career.compcodesolutions.com/api/health
+
+jobs:
+  validate:
+    name: Validate deploy files
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compose file resolves with the env template
+        run: docker compose -f deploy/compose.prod.yml --env-file deploy/career.env.example config -q
+      - name: No published ports
+        run: |
+          if docker compose -f deploy/compose.prod.yml --env-file deploy/career.env.example config | grep -Eq '^\s+(ports|published):'; then
+            echo "::error::deploy/compose.prod.yml publishes a port; Traefik is the only way in."
+            exit 1
+          fi
+      - name: Image is pinned (not latest)
+        run: |
+          if docker compose -f deploy/compose.prod.yml --env-file deploy/career.env.example config | grep -E 'image: ghcr.io/aientech/dossier:(latest)?$'; then
+            echo "::error::Pin ghcr.io/aientech/dossier to a release tag."
+            exit 1
+          fi
+
+  deploy:
+    name: Deploy
+    needs: [validate]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Skip until the deploy secrets exist
+        id: secrets
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          if [ -z "$DEPLOY_HOST" ]; then
+            echo "::notice::DEPLOY_HOST is not set yet (deploy/README.md step 3); skipping the deploy."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up SSH
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.DEPLOY_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Trigger deploy
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          ssh -o BatchMode=yes -i ~/.ssh/id_ed25519 \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "$APP_NAME"
+
+      - name: Wait for health
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          for attempt in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$HEALTH_URL" || true)
+            if [ "$code" = "200" ]; then echo "healthy after $attempt tries"; exit 0; fi
+            sleep 10
+          done
+          echo "::error::$HEALTH_URL did not return 200 within 5 minutes."
+          exit 1
+
+      - name: Clean up key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519
