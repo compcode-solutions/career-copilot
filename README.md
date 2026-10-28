@@ -1,3 +1,8 @@
+> **Career Copilot by CompCode Solutions — a hosted fork of [AienTech/dossier](https://github.com/AienTech/dossier) (AGPL-3.0).**
+> Dossier is the work of its upstream authors; this fork adds CompCode's deployment (`deploy/`) and, in later phases,
+> multi-user accounts (plan: `docs/BUILD-SPEC.md`). The licence and upstream attribution are unchanged. The
+> hosted copy runs at https://career.compcodesolutions.com; its source is this repository.
+
 <p align="center">
   <img src="src/app/icon.svg" alt="" width="80" height="80">
 </p>
