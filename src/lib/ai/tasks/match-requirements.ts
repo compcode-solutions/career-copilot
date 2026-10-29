@@ -152,10 +152,13 @@ export function sameSkill(a: string, b: string): boolean {
 type DegreeLevel = 0 | 1 | 2 | 3;
 
 // Words match in any case; abbreviations only in capitals, so "be able to",
-// "it" and "MS Office" aren't read as degrees or fields.
-const either = (words: RegExp, abbreviations: RegExp) => ({ test: (text: string) => words.test(text) || abbreviations.test(text) });
+// "it" and "MS Office" aren't read as degrees or fields. Text written all in
+// capitals ("MUST BE ABLE TO TRAVEL") gets no abbreviation matching at all.
+const either = (words: RegExp, abbreviations: RegExp) => ({
+  test: (text: string) => words.test(text) || (/[a-z]/.test(text) && abbreviations.test(text)),
+});
 const DOCTORATE = either(/\b(doctorate|doctoral)\b/i, /\bPh\.?\s?D\b/);
-const MASTERS = either(/\b(master'?s?|post[- ]?graduate)\b/i, /\b(M\.?\s?Tech|M\.?\s?Sc|M\.\s?S\.?|M\.\s?E\.?|MBA|MCA|M\.\s?A\.?)(?![\w.])/);
+const MASTERS = either(/\b(master['’]?s|master of|master degree|post[- ]?graduate)\b/i, /\b(M\.?\s?Tech|M\.?\s?Sc|M\.\s?S\.?|M\.\s?E\.?|MBA|MCA|M\.\s?A\.?)(?![\w.])/);
 const BACHELORS = either(/\b(bachelor'?s?|undergraduate)\b/i, /\b(B\.?\s?Tech|B\.?\s?Sc|B\.\s?E\.?|B\.\s?S\.?|B\.\s?A\.?|BCA|BE|BS)(?![\w.])/);
 /** "360-degree" and "a high degree of" aren't degrees. */
 const ANY_DEGREE = /(?<![\d-])\b(degree|graduate|graduation)\b(?!\s+of\b)/i;
@@ -173,8 +176,12 @@ const FIELDS: Record<string, { test: (text: string) => boolean }> = {
 };
 
 /** In Education, short forms that in a posting usually mean something else ("BA" is often Business Analyst). */
-const EDUCATION_MASTERS = /^\s*(MA|MS|MEng)\b/;
-const EDUCATION_BACHELORS = /^\s*(BA|BEng|BBA|BCom|LLB)\b/;
+const EDUCATION_MASTERS = /^\s*(MA|MS|MEng|M\.?\s?Com)\b/;
+const EDUCATION_BACHELORS = /^\s*(BA|BEng|BBA|BBM|B\.?\s?Com|B\.?\s?Arch|LLB)\b/;
+/** "PhD-level rigor" describes a standard, not a degree asked for. */
+const LEVEL_PHRASE = /\b(Ph\.?\s?D\.?|doctoral|doctorate|master['’]?s|graduate)[- ]level\b/gi;
+/** The posting accepts experience in place of the degree. */
+const OR_EXPERIENCE = /\bequivalent\b[^.;]*\bexperience\b|\bexperience\b[^.;]*\bin lieu\b/i;
 
 function degreeLevel(text: string): DegreeLevel {
   if (DOCTORATE.test(text)) return 3;
@@ -184,7 +191,8 @@ function degreeLevel(text: string): DegreeLevel {
 }
 
 /** The lowest degree that meets the requirement, or null when it isn't about a degree. */
-function requiredLevel(text: string): DegreeLevel | null {
+function requiredLevel(requirement: string): DegreeLevel | null {
+  const text = requirement.replace(LEVEL_PHRASE, " ");
   // "Bachelor's or Master's" is met by a bachelor's, so the lowest level named wins.
   if (BACHELORS.test(text)) return 1;
   if (MASTERS.test(text)) return 2;
@@ -216,9 +224,8 @@ export function matchDegree(
   const describe = (entry: EducationItem) => [entry.degree.trim(), entry.school.trim()].filter(Boolean).join(", ");
 
   if (!best || best.level < needed) {
-    return best
-      ? { result: "gap", note: `Your highest listed is ${describe(best.entry)}, below what this asks` }
-      : { result: "gap", note: "No degree in your Education yet" };
+    const note = best ? `Your highest listed is ${describe(best.entry)}, below what this asks` : "No degree in your Education yet";
+    return { result: "gap", note: OR_EXPERIENCE.test(requirement) ? `${note}; it accepts equivalent experience instead` : note };
   }
 
   const fields = Object.keys(FIELDS).filter((field) => FIELDS[field].test(requirement));
@@ -227,5 +234,5 @@ export function matchDegree(
 
   const matching = atLevel.find((item) => inField(item.entry, fields));
   if (matching) return { result: "covered", note: describe(matching.entry) };
-  return { result: "partial", note: `${describe(atLevel[0].entry)}; its field isn't stated in your profile` };
+  return { result: "partial", note: `${describe(atLevel[0].entry)}; your profile doesn't show it is in ${fields.join(" or ")}` };
 }

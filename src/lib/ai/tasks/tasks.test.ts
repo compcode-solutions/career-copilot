@@ -633,7 +633,7 @@ describe("matchDegree", () => {
   it("counts an engineering degree's abbreviation as its field, and calls an unshown field partial", () => {
     expect(matchDegree("Bachelor's in Engineering or Computer Science", [entry("B.Tech")])).toMatchObject({ result: "covered" });
     expect(matchDegree("Bachelor's in Computer Science", [entry("B.Tech", "Computer Science & Engineering")])).toMatchObject({ result: "covered" });
-    expect(matchDegree("Bachelor's in Computer Science", [entry("BA History")])).toEqual({ result: "partial", note: "BA History, Somewhere; its field isn't stated in your profile" });
+    expect(matchDegree("Bachelor's in Computer Science", [entry("BA History")])).toEqual({ result: "partial", note: "BA History, Somewhere; your profile doesn't show it is in computer science" });
   });
 
   it("leaves requirements that aren't about a degree alone", () => {
@@ -647,5 +647,56 @@ describe("matchDegree", () => {
     ]) {
       expect(matchDegree(text, [entry("B.Tech")])).toBeNull();
     }
+  });
+});
+
+describe("matchDegree: independent review cases (K-15)", () => {
+  const entry = (degree: string, notes = "") => ({ id: degree, degree, school: "Somewhere", notes, startYear: null, startMonth: null, endYear: null, endMonth: null, current: false });
+  const btech = [entry("B.Tech")];
+
+  it("leaves ordinary requirements that only look like degrees alone", () => {
+    for (const text of [
+      "Experience working with BAs and PMs",
+      "Will master the codebase quickly",
+      "Scrum Master certification",
+      "Master Data Management experience",
+      "PhD-level rigor is a plus",
+      "360-degree feedback culture",
+      "MUST BE ABLE TO TRAVEL",
+    ]) {
+      expect(matchDegree(text, btech), text).toBeNull();
+    }
+  });
+
+  it("reads a graduate program as asking for a degree", () => {
+    expect(matchDegree("Open to our graduate program", btech)).toMatchObject({ result: "covered" });
+  });
+
+  it("never covers a degree with a diploma", () => {
+    expect(matchDegree("Bachelor's degree in Engineering", [entry("Diploma in Computer Engineering")])).toMatchObject({ result: "gap" });
+  });
+
+  it("does not cover a field it can't see, and says so without naming a degree that isn't there", () => {
+    const result = matchDegree("Bachelor's degree in Computer Science", [entry("B.Com", "Accounting")]);
+    expect(result?.result).toBe("partial");
+    expect(result?.note).toContain("B.Com, Somewhere");
+        expect(result?.note).toContain("computer science");
+  });
+
+  it("knows a B.Com or BBA is a bachelor's", () => {
+    expect(matchDegree("Bachelor's degree", [entry("B.Com")])).toMatchObject({ result: "covered" });
+    expect(matchDegree("Bachelor's degree", [entry("BBA")])).toMatchObject({ result: "covered" });
+  });
+
+  it("is a gap when a master's is required and only a bachelor's is held", () => {
+    expect(matchDegree("Master’s degree required", btech)).toMatchObject({ result: "gap" });
+    expect(matchDegree("Masters in Computer Science", btech)).toMatchObject({ result: "gap" });
+  });
+
+  it("handles 'or equivalent experience' honestly", () => {
+    expect(matchDegree("Bachelor's or equivalent experience", btech)).toMatchObject({ result: "covered" });
+    const none = matchDegree("Bachelor's or equivalent experience", []);
+    expect(none?.result).toBe("gap");
+    expect(none?.note).toMatch(/equivalent experience/);
   });
 });
