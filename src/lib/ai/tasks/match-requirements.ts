@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { matchSchema, type Extracted, type Match } from "@/lib/application-data";
-import { experienceMonths, formatMonthYear, languageLevelLabel, sameName, type ProfileData } from "@/lib/profile";
+import { experienceMonths, formatMonthYear, languageLevelLabel, sameName, type EducationItem, type ProfileData } from "@/lib/profile";
 
 import { system, UNTRUSTED_POSTING, type Task } from "./prompt-parts";
 
@@ -104,6 +104,9 @@ function classify(
   const skill =
     profile.skills.find((entry) => mapped?.skill && sameSkill(entry.name, mapped.skill)) ??
     profile.skills.find((entry) => requirement.skill && sameSkill(entry.name, requirement.skill));
+  // A degree is checked against Education, in code, never by the model.
+  const degree = !skill && requirement.kind === "other" ? matchDegree(requirement.text, profile.education) : null;
+  if (degree) return { ...base, ...degree };
   if (!skill) {
     return {
       ...base,
@@ -138,4 +141,98 @@ export function sameSkill(a: string, b: string): boolean {
       .map((word) => (word.length > 3 && word.endsWith("s") ? word.slice(0, -1) : word))
       .join(" ");
   return key(a) === key(b);
+}
+
+// ─── Degrees ────────────────────────────────────────────────────────────────
+// A posting's "Bachelor's degree in Computer Science" used to fall through to
+// "Nothing in your profile", and the letter then told the employer the
+// candidate had no degree. Degrees are checked here against Education.
+
+/** 0 = not a degree (a diploma, a course), 1 = bachelor's, 2 = master's, 3 = doctorate. */
+type DegreeLevel = 0 | 1 | 2 | 3;
+
+// Words match in any case; abbreviations only in capitals, so "be able to",
+// "it" and "MS Office" aren't read as degrees or fields. Text written all in
+// capitals ("MUST BE ABLE TO TRAVEL") gets no abbreviation matching at all.
+const either = (words: RegExp, abbreviations: RegExp) => ({
+  test: (text: string) => words.test(text) || (/[a-z]/.test(text) && abbreviations.test(text)),
+});
+const DOCTORATE = either(/\b(doctorate|doctoral)\b/i, /\bPh\.?\s?D\b/);
+const MASTERS = either(/\b(master['’]?s|master of|master degree|post[- ]?graduate)\b/i, /\b(M\.?\s?Tech|M\.?\s?Sc|M\.\s?S\.?|M\.\s?E\.?|MBA|MCA|M\.\s?A\.?)(?![\w.])/);
+const BACHELORS = either(/\b(bachelor'?s?|undergraduate)\b/i, /\b(B\.?\s?Tech|B\.?\s?Sc|B\.\s?E\.?|B\.\s?S\.?|B\.\s?A\.?|BCA|BE|BS)(?![\w.])/);
+/** "360-degree" and "a high degree of" aren't degrees. */
+const ANY_DEGREE = /(?<![\d-])\b(degree|graduate|graduation)\b(?!\s+of\b)/i;
+/** Engineering degrees name their field in the abbreviation. */
+const ENGINEERING_DEGREE = either(/\b(bachelor|master) of (technology|engineering)\b/i, /\b(B\.?\s?Tech|B\.\s?E\.?|BE|M\.?\s?Tech|M\.\s?E\.?)(?![\w.])/);
+
+/** Fields a posting may ask for, each with the words that show it in a degree or its notes. */
+const FIELDS: Record<string, { test: (text: string) => boolean }> = {
+  engineering: either(/\bengineering\b/i, /$^/),
+  "computer science": either(/\b(computer science|computer applications|computing)\b/i, /\b(CS|CSE)\b/),
+  "information technology": either(/\binformation technology\b/i, /\bIT\b/),
+  mathematics: either(/\b(mathematics|maths)\b/i, /$^/),
+  statistics: either(/\bstatistics\b/i, /$^/),
+  physics: either(/\bphysics\b/i, /$^/),
+};
+
+/** In Education, short forms that in a posting usually mean something else ("BA" is often Business Analyst). */
+const EDUCATION_MASTERS = /^\s*(MA|MS|MEng|M\.?\s?Com)\b/;
+const EDUCATION_BACHELORS = /^\s*(BA|BEng|BBA|BBM|B\.?\s?Com|B\.?\s?Arch|LLB)\b/;
+/** "PhD-level rigor" describes a standard, not a degree asked for. */
+const LEVEL_PHRASE = /\b(Ph\.?\s?D\.?|doctoral|doctorate|master['’]?s|graduate)[- ]level\b/gi;
+/** The posting accepts experience in place of the degree. */
+const OR_EXPERIENCE = /\bequivalent\b[^.;]*\bexperience\b|\bexperience\b[^.;]*\bin lieu\b/i;
+
+function degreeLevel(text: string): DegreeLevel {
+  if (DOCTORATE.test(text)) return 3;
+  if (MASTERS.test(text) || EDUCATION_MASTERS.test(text)) return 2;
+  if (BACHELORS.test(text) || EDUCATION_BACHELORS.test(text)) return 1;
+  return 0;
+}
+
+/** The lowest degree that meets the requirement, or null when it isn't about a degree. */
+function requiredLevel(requirement: string): DegreeLevel | null {
+  const text = requirement.replace(LEVEL_PHRASE, " ");
+  // "Bachelor's or Master's" is met by a bachelor's, so the lowest level named wins.
+  if (BACHELORS.test(text)) return 1;
+  if (MASTERS.test(text)) return 2;
+  if (DOCTORATE.test(text)) return 3;
+  return ANY_DEGREE.test(text) ? 1 : null;
+}
+
+/** Whether an education entry is in one of the fields the posting names. */
+function inField(entry: EducationItem, fields: string[]): boolean {
+  const text = `${entry.degree} ${entry.notes}`;
+  return fields.some((field) => FIELDS[field].test(text) || (field === "engineering" && ENGINEERING_DEGREE.test(entry.degree)));
+}
+
+/**
+ * A degree requirement checked against Education (covered, partial or gap
+ * with the entry as evidence), or null when the requirement isn't about a
+ * degree. "Or related field" counts any degree at the level asked as partial
+ * when the field isn't shown.
+ */
+export function matchDegree(
+  requirement: string,
+  education: readonly EducationItem[],
+): Pick<Match["items"][number], "result" | "note"> | null {
+  const needed = requiredLevel(requirement);
+  if (needed === null) return null;
+
+  const degrees = education.filter((entry) => entry.degree.trim()).map((entry) => ({ entry, level: degreeLevel(entry.degree) }));
+  const best = degrees.reduce<(typeof degrees)[number] | null>((top, item) => (!top || item.level > top.level ? item : top), null);
+  const describe = (entry: EducationItem) => [entry.degree.trim(), entry.school.trim()].filter(Boolean).join(", ");
+
+  if (!best || best.level < needed) {
+    const note = best ? `Your highest listed is ${describe(best.entry)}, below what this asks` : "No degree in your Education yet";
+    return { result: "gap", note: OR_EXPERIENCE.test(requirement) ? `${note}; it accepts equivalent experience instead` : note };
+  }
+
+  const fields = Object.keys(FIELDS).filter((field) => FIELDS[field].test(requirement));
+  const atLevel = degrees.filter((item) => item.level >= needed);
+  if (fields.length === 0) return { result: "covered", note: describe(atLevel[0].entry) };
+
+  const matching = atLevel.find((item) => inField(item.entry, fields));
+  if (matching) return { result: "covered", note: describe(matching.entry) };
+  return { result: "partial", note: `${describe(atLevel[0].entry)}; your profile doesn't show it is in ${fields.join(" or ")}` };
 }
