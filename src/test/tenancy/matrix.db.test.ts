@@ -121,6 +121,65 @@ describe("the scoped client", () => {
   });
 });
 
+describe("relations reached from a model that isn't owned", () => {
+  // A shared, built-in-style theme that both users' documents use.
+  const shareTheme = async () => {
+    const theme = await db.theme.create({
+      data: { builtIn: true, name: "Shared", headFont: "LORA", bodyFont: "LORA", accent: "#000000" },
+    });
+    await db.document.updateMany({ data: { themeId: theme.id } });
+    return theme.id;
+  };
+
+  it("includes, selects and counts only the caller's rows", async () => {
+    const themeId = await shareTheme();
+    const scoped = scopeClient(db, b.userId);
+    const [theme] = await scoped.theme.findMany({ where: { id: themeId }, include: { documents: true } });
+    expect(theme.documents.map(({ id }) => id)).toEqual(b.ids.Document);
+    const picked = await scoped.theme.findUniqueOrThrow({
+      where: { id: themeId },
+      select: { documents: { select: { id: true, versions: true } }, _count: true },
+    });
+    expect(picked.documents.map(({ id }) => id)).toEqual(b.ids.Document);
+    expect(picked.documents.flatMap(({ versions }) => versions.map(({ id }) => id))).toEqual(b.ids.DocumentVersion);
+    expect(picked._count).toEqual({ documents: b.ids.Document.length });
+    expect(await db.document.count({ where: { themeId } })).toBe(a.ids.Document.length + b.ids.Document.length);
+  });
+
+  it("shows B none of A's rows through the User model or a round trip", async () => {
+    const scoped = scopeClient(db, b.userId);
+    const users = await scoped.user.findMany({ include: { applications: true, notes: true, _count: true } });
+    const userA = users.find(({ id }) => id === a.userId)!;
+    expect(userA.applications).toEqual([]);
+    expect(userA.notes).toEqual([]);
+    expect(Object.values(userA._count).every((count) => count === 0)).toBe(true);
+    await shareTheme();
+    const docs = await scoped.document.findMany({ include: { theme: { include: { documents: true } } } });
+    const reached = docs.flatMap(({ theme }) => theme?.documents.map(({ id }) => id) ?? []);
+    expect(reached.every((id) => b.ids.Document.includes(id))).toBe(true);
+  });
+
+  it("refuses filters, sorts and writes that reach A's rows", async () => {
+    const themeId = await shareTheme();
+    const scoped = scopeClient(db, b.userId);
+    await expect(scoped.theme.findMany({ where: { documents: { some: { kind: "RESUME" } } } })).rejects.toThrow(
+      OwnershipError,
+    );
+    await expect(scoped.theme.findMany({ orderBy: { documents: { _count: "desc" } } })).rejects.toThrow(OwnershipError);
+    await expect(
+      scoped.theme.update({ where: { id: themeId }, data: { documents: { deleteMany: {} } } }),
+    ).rejects.toThrow(OwnershipError);
+    await expect(
+      scoped.document.update({
+        where: { id: b.ids.Document[0] },
+        // Prisma's types forbid this shape; the guard must still refuse it from untyped callers.
+        data: { theme: { update: { documents: { set: [] } } } } as never,
+      }),
+    ).rejects.toThrow(OwnershipError);
+    expect(await db.document.count({ where: { themeId } })).toBe(a.ids.Document.length + b.ids.Document.length);
+  });
+});
+
 describe("the matrix", () => {
   it("covers every table that has an owner", async () => {
     const tables = await db.$queryRaw<{ table_name: string }[]>`

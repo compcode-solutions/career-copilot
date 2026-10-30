@@ -1,5 +1,7 @@
 import type { PrismaClient } from "@/generated/prisma/client";
+import { OwnershipError } from "@/lib/db/errors";
 import { ownedModel, OWNED_MODELS, type OwnedModel } from "@/lib/db/owned-models";
+import { guardRelations } from "@/lib/db/relation-guard";
 
 /**
  * The owner-scoped database client (ADR 0002 §3). `scopeClient(prisma, userId)`
@@ -10,7 +12,10 @@ import { ownedModel, OWNED_MODELS, type OwnedModel } from "@/lib/db/owned-models
  *   so another user's row looks exactly like a missing one;
  * - sets `userId` on every create, including nested creates of owned children;
  * - refuses to change a row's owner;
- * - refuses raw SQL, which a model filter cannot see.
+ * - refuses raw SQL, which a model filter cannot see;
+ * - scopes or refuses whatever a query reaches through relations, from any
+ *   model (`include`, `select`, `_count`, `where`, `orderBy`, nested writes):
+ *   relation-guard.ts.
  *
  * Attaching a row to another user's parent (an application, a document) is
  * refused by the database itself: Migration A adds an owner-check trigger on
@@ -21,10 +26,7 @@ import { ownedModel, OWNED_MODELS, type OwnedModel } from "@/lib/db/owned-models
  * Reference: https://www.prisma.io/docs/orm/prisma-client/client-extensions/query
  */
 
-/** Thrown when a query would cross tenants or escape the owner filter. */
-export class OwnershipError extends Error {
-  override name = "OwnershipError";
-}
+export { OwnershipError };
 
 const WHERE_OPERATIONS = new Set([
   "findUnique", "findUniqueOrThrow", "findFirst", "findFirstOrThrow", "findMany",
@@ -144,9 +146,10 @@ export function scopeClient(client: PrismaClient, userId: string) {
         if (model === undefined) {
           throw new OwnershipError(`${operation} is not available on a user's client: raw SQL can't be scoped.`);
         }
+        const guarded = guardRelations(model, operation, (args ?? {}) as Data, userId);
         const entry = ownedModel(model);
-        if (!entry) return query(args);
-        return query(scopeArgs(entry, operation, (args ?? {}) as Data, userId) as typeof args);
+        if (!entry) return query(guarded as typeof args);
+        return query(scopeArgs(entry, operation, guarded, userId) as typeof args);
       },
     },
   });
